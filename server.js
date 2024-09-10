@@ -5,6 +5,7 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 const fs = require("fs");
 const path = require("path");
+const axios = require("axios");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -14,8 +15,8 @@ const PORT = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cors());
 
-app.post("/api/videoinfo", async (req, res) => {
-  const videoUrl = req.body.url;
+app.get("/api/videoinfo", async (req, res) => {
+  const videoUrl = req.query.url;
 
   if (!ytdl.validateURL(videoUrl)) {
     console.error("Invalid YouTube URL:", videoUrl);
@@ -24,197 +25,99 @@ app.post("/api/videoinfo", async (req, res) => {
 
   try {
     console.log("Fetching video info for URL:", videoUrl);
-    const info = await ytdl.getInfo(videoUrl);
-    console.log("Available formats:", info.formats); // Log available formats
+    const info = await ytdl.getInfo(videoUrl, {
+      requestOptions: {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+          Referer: "https://www.youtube.com/",
+          Accept: "*/*",
+        },
+      },
+    });
 
-    const formats = ytdl.filterFormats(info.formats, "audioandvideo");
+    const videoFormats = ytdl.filterFormats(info.formats, "videoonly");
+    const audioVideoFormats = ytdl.filterFormats(info.formats, "audioandvideo");
+    const audioFormats = ytdl.filterFormats(info.formats, "audioonly");
+
+    // Combine and sort formats
+    const combinedFormats = [...audioVideoFormats, ...videoFormats].sort(
+      (a, b) => {
+        const getQuality = (format) => parseInt(format.qualityLabel) || 0;
+        if (a.hasAudio && !b.hasAudio) return -1; // Prioritize formats with audio
+        if (!a.hasAudio && b.hasAudio) return 1;
+        return getQuality(b) - getQuality(a); // Sort by quality in descending order
+      }
+    );
+
+    // Function to check if a URL is working
+    const isUrlWorking = async (url) => {
+      try {
+        const response = await axios.get(url, {
+          headers: { Range: "bytes=0-1024" }, // Request only the first 1KB
+          timeout: 3000, // Set a timeout for the request
+        });
+        console.log("getting responce", response.status);
+        return response.status === 206 || response.status == 200;
+      } catch (error) {
+        if (error.response && error.response.status === 403) {
+          console.error("URL returned 403 Forbidden:", url);
+        }
+        return false;
+      }
+    };
+
+    // Filter working URLs
+    const filterWorkingUrls = async (formats) => {
+      const results = [];
+      for (const format of formats) {
+        if (await isUrlWorking(format.url)) {
+          results.push(format);
+        }
+      }
+      return results;
+    };
+
+    // Get working video formats
+    const videoFormatsWorking = await filterWorkingUrls(combinedFormats);
+    const audioFormatsWorking = await filterWorkingUrls(audioFormats);
+    const wavFormatsWorking = await filterWorkingUrls(
+      audioVideoFormats.filter((f) => f.container === "wav")
+    );
 
     const videoDetails = {
       title: info.videoDetails.title,
       thumbnail: info.videoDetails.thumbnails.pop().url, // highest quality thumbnail
       author: info.videoDetails.author.name,
-      availableQualities: formats.map((format) => ({
+      videoFormats: videoFormatsWorking.map((format) => ({
         quality: format.qualityLabel,
+        hasAudio: format.hasAudio,
+        url: format.url,
+        mimeType: format.mimeType,
+        codec: format.codecs,
+      })),
+      audioFormats: audioFormatsWorking.map((format) => ({
         audioQuality: format.audioQuality,
         url: format.url,
+        mimeType: format.mimeType,
+        codec: format.codecs,
       })),
-      audioList: ytdl
-        .filterFormats(info.formats, "audioonly")
-        .map((format) => ({
-          quality: format.audioQuality,
-          url: format.url,
-        })),
+      wavFormats: wavFormatsWorking.map((format) => ({
+        quality: format.qualityLabel,
+        hasAudio: format.hasAudio,
+        url: format.url,
+        mimeType: format.mimeType,
+        codec: format.codecs,
+      })),
     };
 
-    console.log("Video details retrieved successfully:", videoDetails);
+    // console.log("Video details retrieved successfully:", videoDetails);
     res.json(videoDetails);
   } catch (error) {
     console.error("Failed to retrieve video details:", error.message);
     res.status(500).json({ error: "Failed to retrieve video details" });
   }
 });
-
-app.get("/bala", (req, res) => {
-  try {
-    const videoPath = "video.mp4"; // Replace with your video file path
-    const audioPath = "audio.mp3"; // Replace with your audio file path
-    const outputPath = "merged_output.mp4"; // Replace with desired output path
-
-    ffmpeg()
-      .input(videoPath)
-      .input(audioPath)
-      .videoCodec("copy")
-      .audioCodec("copy")
-      .output(outputPath)
-      .on("end", () => {
-        console.log("Complete");
-      })
-      .on("error", (err) => {
-        console.error("Error during merging:", err);
-      })
-      .run();
-    res.send("running");
-  } catch (error) {
-    console.log(error);
-    res.send("erro");
-  }
-});
-
-app.get("/download", async (req, res) => {
-  const videoUrl = req.query.url;
-  if (!videoUrl) {
-    console.error("No YouTube URL provided.");
-    return res.status(400).json({ error: "YouTube URL is required" });
-  }
-
-  const tempVideoPath = path.join(__dirname, "temp_video.mp4");
-  const tempAudioPath = path.join(__dirname, "temp_audio.mp4");
-  const finalOutputPath = path.join(__dirname, "final_output.mp4");
-
-  try {
-    console.log("Fetching video info for URL:", videoUrl);
-
-    const info = await ytdl.getInfo(videoUrl);
-    const videoFormat = ytdl.chooseFormat(info.formats, {
-      quality: "highestvideo",
-    });
-    const audioFormat = ytdl.chooseFormat(info.formats, {
-      quality: "highestaudio",
-    });
-
-    if (!videoFormat || !audioFormat) {
-      console.error("No suitable formats found.");
-      return res.status(500).json({ error: "No suitable formats found" });
-    }
-
-    console.log("Selected video format:", videoFormat.itag);
-    console.log("Selected audio format:", audioFormat.itag);
-
-    const videoStream = ytdl(videoUrl, { format: videoFormat.itag });
-    const audioStream = ytdl(videoUrl, { format: audioFormat.itag });
-
-    const videoFileStream = fs.createWriteStream(tempVideoPath);
-    const audioFileStream = fs.createWriteStream(tempAudioPath);
-
-    videoStream.pipe(videoFileStream);
-    audioStream.pipe(audioFileStream);
-
-    // videoFileStream.on("finish", () => {
-    //   audioFileStream.on("finish", () => {
-    //     console.log("start merging the audio and video");
-    //     ffmpeg(tempVideoPath)
-    //       .input(tempAudioPath)
-    //       .audioCodec("aac")
-    //       .videoCodec("copy")
-    //       .format("mp4")
-    //       .setFfmpegPath(ffmpegPath) // Ensure this path is set correctly
-    //       .on("end", () => {
-    //         console.log("Finished processing and merging streams.");
-    //         res.download(finalOutputPath, (err) => {
-    //           if (err) {
-    //             console.error("Error sending file:", err.message);
-    //             res.status(500).json({ error: "Error sending file" });
-    //           }
-    //           fs.unlink(tempVideoPath, () => {});
-    //           fs.unlink(tempAudioPath, () => {});
-    //           fs.unlink(finalOutputPath, () => {});
-    //         });
-    //       })
-    //       .on("error", (err) => {
-    //         console.error("Error during ffmpeg processing:", err.message);
-    //         res.status(500).json({ error: "Error processing video" });
-    //       })
-    //       .save(finalOutputPath);
-    //   });
-    // });
-
-    console.log("write file complete");
-    // await new Promise((resolve, reject) => {
-    //   let videoStreamEnded = false;
-    //   let audioStreamEnded = false;
-    //   console.log("inside promise");
-    //   const checkIfBothEnded = () => {
-    //     if (videoStreamEnded && audioStreamEnded) {
-    //       console.log("Both video and audio streams ended.");
-    //       resolve();
-    //     }
-    //   };
-
-    //   videoStream.on("end", () => {
-    //     console.log("Video stream ended");
-    //     videoStreamEnded = true;
-    //     checkIfBothEnded();
-    //   });
-
-    //   audioStream.on("end", () => {
-    //     console.log("Audio stream ended");
-    //     audioStreamEnded = true;
-    //     checkIfBothEnded();
-    //   });
-
-    //   videoStream.on("error", (err) => {
-    //     console.error("Video stream error:", err);
-    //     reject(err);
-    //   });
-
-    //   audioStream.on("error", (err) => {
-    //     console.error("Audio stream error:", err);
-    //     reject(err);
-    //   });
-
-    //   // Optionally handle the 'close' event if necessary
-    //   videoStream.on("close", () => {
-    //     console.log("Video stream closed");
-    //   });
-
-    //   audioStream.on("close", () => {
-    //     console.log("Audio stream closed");
-    //   });
-    // });
-  } catch (error) {
-    console.error("Server error:", error.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to download and merge video" });
-    }
-  }
-});
-
-// app.get("/download", async (req, res) => {
-//   try {
-//     const url = req.query.url;
-//     console.log("collection video url");
-//     const videoId = ytdl.getURLVideoID(url);
-//     console.log("getting video info");
-//     const metaInfo = await ytdl.getInfo(url);
-//     let data = {
-//       url: "https://www.youtube.com/embed/" + videoId,
-//       info: metaInfo.formats,
-//     };
-//     return res.send(data);
-//   } catch (error) {
-//     return res.status(500).send(error);
-//   }
-// });
 
 app.get("/download-audio", async (req, res) => {
   const videoUrl = req.query.url;
