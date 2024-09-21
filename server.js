@@ -7,6 +7,8 @@ const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
 
+const agent = ytdl.createAgent(JSON.parse(fs.readFileSync("cookie.json")));
+
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
@@ -25,17 +27,8 @@ app.get("/api/videoinfo", async (req, res) => {
 
   try {
     console.log("Fetching video info for URL:", videoUrl);
-    const info = await ytdl.getInfo(videoUrl, {
-      requestOptions: {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-          Referer: "https://www.youtube.com/",
-          Accept: "*/*",
-        },
-      },
-    });
-
+    // const agent = ytdl.createAgent(JSON.parse(fs.readFileSync("cookies.json")));
+    const info = await ytdl.getInfo(videoUrl, { agent });
     const videoFormats = ytdl.filterFormats(info.formats, "videoonly");
     const audioVideoFormats = ytdl.filterFormats(info.formats, "audioandvideo");
     const audioFormats = ytdl.filterFormats(info.formats, "audioonly");
@@ -50,6 +43,18 @@ app.get("/api/videoinfo", async (req, res) => {
       }
     );
 
+    // Helper function to select one format per video quality
+    const selectHighestQualityFormat = (formats) => {
+      const qualityMap = new Map();
+      for (const format of formats) {
+        const quality = format.qualityLabel || format.audioQuality;
+        if (!qualityMap.has(quality)) {
+          qualityMap.set(quality, format); // Add the format if no other format of this quality exists
+        }
+      }
+      return Array.from(qualityMap.values());
+    };
+
     // Function to check if a URL is working
     const isUrlWorking = async (url) => {
       try {
@@ -57,7 +62,7 @@ app.get("/api/videoinfo", async (req, res) => {
           headers: { Range: "bytes=0-1024" }, // Request only the first 1KB
           timeout: 3000, // Set a timeout for the request
         });
-        console.log("getting responce", response.status);
+        console.log("Getting response", response.status);
         return response.status === 206 || response.status == 200;
       } catch (error) {
         if (error.response && error.response.status === 403) {
@@ -85,24 +90,29 @@ app.get("/api/videoinfo", async (req, res) => {
       audioVideoFormats.filter((f) => f.container === "wav")
     );
 
+    // Select highest quality formats for both video and audio
+    const uniqueVideoFormats = selectHighestQualityFormat(videoFormatsWorking);
+    const uniqueAudioFormats = selectHighestQualityFormat(audioFormatsWorking);
+    const uniqueWavFormats = selectHighestQualityFormat(wavFormatsWorking);
+
     const videoDetails = {
       title: info.videoDetails.title,
       thumbnail: info.videoDetails.thumbnails.pop().url, // highest quality thumbnail
       author: info.videoDetails.author.name,
-      videoFormats: videoFormatsWorking.map((format) => ({
+      videoFormats: uniqueVideoFormats.map((format) => ({
         quality: format.qualityLabel,
         hasAudio: format.hasAudio,
         url: format.url,
         mimeType: format.mimeType,
         codec: format.codecs,
       })),
-      audioFormats: audioFormatsWorking.map((format) => ({
+      audioFormats: uniqueAudioFormats.map((format) => ({
         audioQuality: format.audioQuality,
         url: format.url,
         mimeType: format.mimeType,
         codec: format.codecs,
       })),
-      wavFormats: wavFormatsWorking.map((format) => ({
+      wavFormats: uniqueWavFormats.map((format) => ({
         quality: format.qualityLabel,
         hasAudio: format.hasAudio,
         url: format.url,
@@ -119,181 +129,166 @@ app.get("/api/videoinfo", async (req, res) => {
   }
 });
 
-app.get("/download-audio", async (req, res) => {
+const audioQualityMapping = {
+  low: "139", // Lowest quality (48kbps)
+  medium: "140", // Medium quality (128kbps)
+  high: "251", // Highest quality (160kbps Opus)
+};
+
+app.get("/api/download/audio", async (req, res) => {
   const videoUrl = req.query.url;
-  if (!videoUrl) {
-    return res.status(400).json({ error: "URL parameter is required" });
+  const quality = req.query.quality; // low, medium, or high
+
+  if (!ytdl.validateURL(videoUrl)) {
+    return res.status(400).json({ error: "Invalid YouTube URL" });
   }
 
-  try {
-    // Get video info
-    const videoInfo = await ytdl.getInfo(videoUrl);
+  console.log("Downloading audio for URL:", videoUrl, "with quality:", quality);
 
-    // Find the highest quality audio stream
-    const audioFormat = ytdl.chooseFormat(videoInfo.formats, {
-      quality: "highestaudio",
+  try {
+    const info = await ytdl.getInfo(videoUrl, { agent });
+    const selectedTag =
+      audioQualityMapping[quality] || audioQualityMapping["low"]; // Default to medium if quality is not provided
+
+    console.log("selected tag ", selectedTag);
+    // Select the audio format based on the quality
+    const audioFormat = ytdl.chooseFormat(info.formats, {
+      quality: "lowestaudio",
       filter: "audioonly",
     });
-
+    console.log("selected audio format ", audioFormat);
     if (!audioFormat) {
-      return res.status(404).json({ error: "No suitable audio format found" });
+      return res
+        .status(404)
+        .json({ error: "Requested audio format not found" });
     }
 
-    // Set headers for download
-    res.header(
-      "Content-Disposition",
-      `attachment; filename="${videoInfo.videoDetails.title}.mp3"`
-    );
-    res.header("Content-Type", "audio/mpeg");
+    const title = info.videoDetails.title; // Sanitize the video title
+    const fileName = `${title}.mp3`; // You can also use other extensions like .ogg based on the codec
 
-    // Stream the audio and convert to MP3
-    const audioStream = ytdl(videoUrl, {
-      format: audioFormat,
-      requestOptions: {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        },
-      },
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(fileName)}"`
+    );
+    res.setHeader("Content-Type", "audio/mpeg");
+
+    console.log("Starting audio download");
+
+    const audioStream = ytdl(videoUrl, { format: audioFormat, agent });
+
+    // Handle stream errors
+    audioStream.on("error", (streamError) => {
+      console.error("Stream error:", streamError.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Error while streaming the audio" });
+      }
     });
 
-    ffmpeg(audioStream)
-      .audioCodec("libmp3lame")
-      .format("mp3")
-      .on("end", () => {
-        console.log("Audio download complete");
-      })
-      .on("error", (err) => {
-        console.error("Error during audio processing:", err);
-        if (!res.headersSent) {
-          res.status(500).json({ error: "Error during audio processing" });
-        }
-      })
-      .pipe(res, { end: true });
+    // Notify the frontend when the download starts
+    audioStream.on("pipe", () => {
+      console.log("Audio stream started.");
+    });
+
+    // Listen to the 'end' event to notify the client when the download completes
+    audioStream.on("end", () => {
+      console.log("Audio download completed.");
+      if (!res.headersSent) {
+        res.end(
+          JSON.stringify({ message: "Audio download completed successfully" })
+        );
+      }
+    });
+
+    // Pipe the audio stream to the response
+    audioStream.pipe(res);
   } catch (error) {
-    console.error("Error processing video:", error);
+    console.error("Failed to download audio:", error.message);
     if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to process video" });
+      res
+        .status(500)
+        .json({ error: "Failed to download audio: " + error.message });
     }
   }
 });
 
-app.get("/download-video", async (req, res) => {
+const tagQualityMapping = {
+  "360p": "18",
+  "1080p": "248",
+  "720p": "136",
+  "480p": "135",
+};
+
+app.get("/api/download/video", async (req, res) => {
   const videoUrl = req.query.url;
-  if (!videoUrl) {
-    return res.status(400).json({ error: "URL parameter is required" });
+  let format = req.query.format.toString(); // Expect format information in query
+
+  if (!ytdl.validateURL(videoUrl)) {
+    return res.status(400).json({ error: "Invalid YouTube URL" });
   }
 
   try {
-    // Get video info
-    const videoInfo = await ytdl.getInfo(videoUrl);
+    const info = await ytdl.getInfo(videoUrl, { agent });
+    console.log("requested format ", format);
+    const tag = "18";
+    if (!tag) {
+      return res.status(400).json({ error: "Invalid format tag" });
+    }
 
-    // Find the highest quality video stream
-    const videoFormat = ytdl.chooseFormat(videoInfo.formats, {
-      quality: "highestvideo",
-      filter: (format) =>
-        format.container === "mp4" && format.hasVideo && !format.hasAudio,
-    });
-
-    // Find the highest quality audio stream
-    const audioFormat = ytdl.chooseFormat(videoInfo.formats, {
-      quality: "highestaudio",
-      filter: "audioonly",
-    });
-
-    if (!videoFormat || !audioFormat) {
+    const videoFormat = ytdl.chooseFormat(info.formats, { quality: tag });
+    if (!videoFormat) {
       return res
         .status(404)
-        .json({ error: "Suitable video/audio format not found" });
+        .json({ error: "Requested video format not found" });
     }
 
-    // Create temporary file paths
-    const videoPath = path.resolve(__dirname, "video.mp4");
-    const audioPath = path.resolve(__dirname, "audio.mp3");
-    const outputPath = path.resolve(
-      __dirname,
-      `${videoInfo.videoDetails.title}.mp4`
+    const title = info.videoDetails.title; // Sanitize the video title
+    const fileName = `${title}.mp4`;
+
+    // Headers for file download
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(fileName)}"`
     );
+    res.setHeader("Content-Type", "video/mp4");
 
-    // Stream the video and audio to local files
-    const videoStream = ytdl(videoUrl, {
-      format: videoFormat,
-      requestOptions: {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        },
-      },
+    console.log("Starting video download...");
+
+    const videoStream = ytdl(videoUrl, { format: videoFormat, agent });
+
+    // Stream errors handling
+    videoStream.on("error", (streamError) => {
+      console.error("Stream error:", streamError.message);
+      console.log(streamError);
+      // If headers haven't been sent yet, send the error
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Error while streaming the video" });
+      }
     });
 
-    const audioStream = ytdl(videoUrl, {
-      format: audioFormat,
-      requestOptions: {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        },
-      },
+    // Listen for download start
+    res.on("pipe", () => {
+      console.log("Video stream started.");
     });
 
-    // Save video and audio streams to temporary files
-    await new Promise((resolve, reject) => {
-      videoStream
-        .pipe(fs.createWriteStream(videoPath))
-        .on("finish", resolve())
-        .on("error", reject());
+    // Listen for stream end
+    videoStream.on("end", () => {
+      console.log("Download completed.");
+      if (!res.headersSent) {
+        res.end();
+      }
     });
-    console.log("video stream write complete", videoPath);
-    await new Promise((resolve, reject) => {
-      audioStream
-        .pipe(fs.createWriteStream(audioPath))
-        .on("finish", resolve())
-        .on("error", reject());
-    });
-    console.log("audio stream write complete", audioPath);
-    // Check if the files were successfully created
-    if (!fs.existsSync(videoPath)) {
-      throw new Error("Video file not found");
-    }
-    if (!fs.existsSync(audioPath)) {
-      throw new Error("Audio file not found");
-    }
 
-    setTimeout(() => {
-      // Merge video and audio using ffmpeg and send the result
-      ffmpeg()
-        .input("video.mp4")
-        .input("audio.mp3")
-        .videoCodec("copy")
-        .audioCodec("copy")
-        .outputOptions("-strict -2")
-        .output(outputPath)
-        .on("end", () => {
-          console.log("Merging complete");
-          res.download(
-            outputPath,
-            `${videoInfo.videoDetails.title}.mp4`,
-            (err) => {
-              // Clean up temporary files after download
-              fs.unlink(videoPath, () => {});
-              fs.unlink(audioPath, () => {});
-              fs.unlink(outputPath, () => {});
-            }
-          );
-        })
-        .on("error", (err, stdout, stderr) => {
-          console.error("Error during merging:", err);
-          console.error("FFmpeg stderr output:", stderr);
-          res.status(500).json({ error: "Error during merging" });
-          // fs.unlink(videoPath, () => {});
-          // fs.unlink(audioPath, () => {});
-          // fs.unlink(outputPath, () => {});
-        })
-        .run();
-    }, 20000);
+    // Pipe the video stream to the response
+    videoStream.pipe(res);
   } catch (error) {
-    console.error("Error processing video:", error);
-    res.status(500).json({ error: "Failed to process video" });
+    console.error("Failed to download video:", error.message);
+    console.log(error);
+    // If the response hasn't been sent yet, send the error
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ error: "Failed to download video: " + error.message });
+    }
   }
 });
 
