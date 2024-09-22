@@ -4,8 +4,8 @@ const { setTimeout } = require("timers/promises");
 async function scrapeFromOtherWeb(youtubeUrl) {
   // Launch a browser in headless mode
   const browser = await puppeteer.launch({
-    headless: false,
-    executablePath: "/usr/bin/google-chrome",
+    headless: true,
+    executablePath: "/usr/bin/google-chrome-stable",
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -30,7 +30,57 @@ async function scrapeFromOtherWeb(youtubeUrl) {
   // Find and return all buttons
   const buttons = await findButtons(page);
 
-  return { buttons, browser, page };
+  const videotileduraiton = await extractTitleAndDuration(page);
+
+  const videoimg = await extractImageUrl(page);
+
+  return { buttons, browser, page, videotileduraiton, videoimg };
+}
+
+async function extractImageUrl(page) {
+  // Wait for the img element to load
+  await page.waitForSelector("img.img-thumbnail");
+
+  // Use evaluate to extract the src attribute from the img element
+  const imageUrl = await page.evaluate(() => {
+    const imgElement = document.querySelector("img.img-thumbnail");
+    return imgElement ? imgElement.getAttribute("src") : null;
+  });
+
+  if (imageUrl) {
+    console.log("Image URL:", imageUrl);
+  } else {
+    console.log("No image URL found.");
+  }
+
+  return imageUrl;
+}
+
+async function extractTitleAndDuration(page) {
+  // Wait for the div containing the title and duration
+  await page.waitForSelector("div.caption.text-left");
+
+  // Use evaluate to extract the title and duration
+  const result = await page.evaluate(() => {
+    // Find the span with id 'video_title' for the title
+    const title = document.querySelector("span#video_title")?.innerText;
+
+    // Find the p tag inside the div.caption.text-left that contains 'Duration'
+    const duration = Array.from(
+      document.querySelectorAll("div.caption.text-left p")
+    ).find((p) => p.innerText.includes("Duration"))?.innerText;
+
+    return { title, duration };
+  });
+
+  if (result) {
+    console.log("Video Title:", result.title);
+    console.log("Video Duration:", result.duration);
+  } else {
+    console.log("No title or duration found.");
+  }
+
+  return result;
 }
 
 async function findButtons(page) {
@@ -42,6 +92,8 @@ async function findButtons(page) {
 
 async function clickButtonByQuality(buttons, quality, page) {
   // Loop through buttons and find the one with the desired quality in the onclick function
+
+  console.log("inside the click button by quality funciton ", quality);
   for (const button of buttons) {
     const onclickValue = await button.evaluate((btn) =>
       btn.getAttribute("onclick")
@@ -49,12 +101,11 @@ async function clickButtonByQuality(buttons, quality, page) {
     console.log("Button onclick attribute:", onclickValue);
 
     // Check if the onclick contains the desired quality (e.g., '720p')
-    if (onclickValue && onclickValue.includes(`'${quality}p'`)) {
+    if (onclickValue && onclickValue.includes(`'${quality}'`)) {
       console.log(
         `Found button with ${quality}p quality. Clicking the button...`
       );
       await button.click();
-      await setTimeout(5000); // Wait for the modal to appear
       break; // Exit the loop after clicking the correct button
     }
   }
@@ -62,10 +113,14 @@ async function clickButtonByQuality(buttons, quality, page) {
   // Proceed to the next steps
   //   await handleDownloadLink(page);
   // Wait for the modal body and download link
+  console.log("waiting for modal ");
+  await setTimeout(5000); // Wait for the modal to appear
   await page.waitForSelector(".modal-body");
+  await setTimeout(3000);
   await page.waitForSelector("#A_downloadUrl");
 
   const downloadUrlElement = await page.$("#A_downloadUrl");
+  console.log("gettting the url ", downloadUrlElement);
   if (downloadUrlElement) {
     const downloadUrl = await downloadUrlElement.evaluate((el) =>
       el.getAttribute("href")
@@ -80,12 +135,16 @@ async function clickButtonByQuality(buttons, quality, page) {
 }
 
 // Example usage
-(async () => {
-  const youtubeUrl = "https://youtu.be/bi2OPrRwSTk?si=V2jmbeIRHS880zqZ"; // Replace with your YouTube URL
-  const quality = "720"; // Specify the desired quality
+// (async () => {
+//   const youtubeUrl = "https://youtu.be/bi2OPrRwSTk?si=V2jmbeIRHS880zqZ"; // Replace with your YouTube URL
+//   const quality = "720"; // Specify the desired quality
 
-  const { buttons, browser, page } = await scrapeFromOtherWeb(youtubeUrl);
-  const downloadUrl = await clickButtonByQuality(buttons, quality, page);
-  console.log("download url ", downloadUrl);
-  browser.close();
-})();
+//   const downloadUrl = await clickButtonByQuality(buttons, quality, page);
+//   console.log("download url ", downloadUrl);
+//   browser.close();
+// })();
+
+module.exports = {
+  scrapeFromOtherWeb,
+  clickButtonByQuality,
+};
