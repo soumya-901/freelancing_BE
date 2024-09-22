@@ -1,9 +1,6 @@
 const express = require("express");
 const ytdl = require("@distube/ytdl-core");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const axios = require("axios");
 const {
   scrapeFromOtherWeb,
   clickButtonByQuality,
@@ -24,6 +21,11 @@ app.get("/api/videoinfo", async (req, res) => {
   const videoUrl = req.query.url;
 
   try {
+    if (!ytdl.validateURL(videoUrl)) {
+      return res
+        .status(400)
+        .json({ error: "Please Provide a Valid youtube url" });
+    }
     const { buttons, browser, page, videotileduraiton, videoimg } =
       await scrapeFromOtherWeb(videoUrl);
     const ClarityList = [];
