@@ -103,7 +103,7 @@ async function clickButtonByQuality(buttons, quality, page) {
     // Check if the onclick contains the desired quality (e.g., '720p')
     if (onclickValue && onclickValue.includes(`'${quality}'`)) {
       console.log(
-        `Found button with ${quality}p quality. Clicking the button...`
+        `Found button with ${quality} quality. Clicking the button...`
       );
       await button.click();
       break; // Exit the loop after clicking the correct button

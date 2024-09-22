@@ -22,9 +22,7 @@ app.get("/api/videoinfo", async (req, res) => {
 
   try {
     if (!ytdl.validateURL(videoUrl)) {
-      return res
-        .status(400)
-        .json({ error: "Please Provide a Valid youtube url" });
+      return res.status(400).json({ ERRCODE: "INVALIDURL" });
     }
     const { buttons, browser, page, videotileduraiton, videoimg } =
       await scrapeFromOtherWeb(videoUrl);
@@ -86,7 +84,7 @@ app.get("/api/download/audio", async (req, res) => {
   try {
     const { buttons, browser, page, videotileduraiton, videoimg } =
       await scrapeFromOtherWeb(audiourl);
-    const downloadUrl = await clickButtonByQuality(buttons, format + "k", page);
+    const downloadUrl = await clickButtonByQuality(buttons, format, page);
     res.json({ DownloadURL: downloadUrl });
     browser.close();
   } catch (error) {
@@ -115,7 +113,7 @@ app.get("/api/download/video", async (req, res) => {
   try {
     const { buttons, browser, page, videotileduraiton, videoimg } =
       await scrapeFromOtherWeb(videoUrl);
-    const downloadUrl = await clickButtonByQuality(buttons, format + "p", page);
+    const downloadUrl = await clickButtonByQuality(buttons, format, page);
     res.json({ DownloadURL: downloadUrl });
     browser.close();
   } catch (error) {
